@@ -4,7 +4,7 @@
 
 支持协议：
 
-- Hysteria2：`hy2://`、`hysteria2://`
+- Hysteria2：`hysteria2://`
 - TUIC v5：`tuic://`
 - VLESS：`vless://`
 
@@ -63,7 +63,7 @@ Value: your-sub-path
 ```text
 Name: NODES
 Value:
-hy2://password@example.com:443?sni=example.com&insecure=1#hysteria2-node
+hysteria2://password@example.com:443?sni=example.com&insecure=1#hysteria2-node
 tuic://uuid:password@example.com:443?congestion_control=bbr&udp_relay_mode=native&alpn=h3&sni=example.com#tuic-node
 vless://uuid@example.com:443?security=tls&sni=example.com&type=ws&host=example.com&path=%2Fvless#vless-node
 https://example.com/subscription-link
@@ -82,7 +82,7 @@ https://example.com/subscription-link
 
 默认接口会把支持的节点转换为 sing-box / SFA 可用的 JSON 配置。
 
-`format=base64` 和 `client=shadowrocket/v2rayn` 会返回 Base64 节点订阅，只保留 `hy2://`、`hysteria2://`、`tuic://`、`vless://` 节点。其它协议节点不会写入订阅。
+`format=base64` 和 `client=shadowrocket/v2rayn` 会返回 Base64 节点订阅，只保留 `hysteria2://`、`tuic://`、`vless://` 节点。其它协议节点不会写入订阅。
 
 每个远程订阅最多等待 8 秒。超时、访问失败、使用 `http://` 或指向当前订阅地址时，会跳过对应链接，不影响其它节点输出。
 

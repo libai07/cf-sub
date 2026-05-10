@@ -1,5 +1,5 @@
 const SUBSCRIPTION_TIMEOUT_MS = 8000;
-const SUPPORTED_NODE_PROTOCOLS = ["hysteria2:", "hy2:", "tuic:", "vless:"];
+const SUPPORTED_NODE_PROTOCOLS = ["hysteria2:", "tuic:", "vless:"];
 const BASE64_CLIENTS = ["shadowrocket", "v2rayn"];
 const SING_BOX_CLIENTS = ["sing-box", "singbox", "sfa"];
 const BASE_HEADERS = {
@@ -331,7 +331,6 @@ function parseNode(value) {
 
   switch (url.protocol) {
     case "hysteria2:":
-    case "hy2:":
       return parseHysteria2Node(url);
     case "tuic:":
       return parseTuicNode(url);
