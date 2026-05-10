@@ -1,0 +1,2 @@
+compatibility_date = "2026-05-11"
+compatibility_flags = ["allow_custom_ports"]
