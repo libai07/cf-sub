@@ -1,0 +1,118 @@
+# Cloudflare Pages 订阅服务
+
+这个项目用 Cloudflare Pages Function 读取环境变量，生成代理客户端订阅。
+
+支持协议：
+
+- Hysteria2：`hy2://`、`hysteria2://`
+- TUIC v5：`tuic://`
+- VLESS：`vless://`
+
+## 文件
+
+- `functions/[path].js`：订阅接口，只有访问 `SUB_PATH` 指定的路径才会返回订阅。
+- `public/_headers`：基础安全响应头。
+- `public/robots.txt`：阻止爬虫抓取。
+
+## 订阅地址
+
+绑定自定义域后，sing-box / SFA 客户端订阅地址是：
+
+```text
+https://your-sub-domain.example/your-sub-path
+```
+
+默认返回 sing-box JSON 配置。接口会尝试根据客户端 `User-Agent` 自动返回合适格式：
+
+- sing-box / SFA：JSON 配置
+- 小火箭 / v2rayN：Base64 节点订阅
+- 无法识别：JSON 配置
+
+小火箭 / v2rayN 使用 Base64 节点订阅地址：
+
+```text
+https://your-sub-domain.example/your-sub-path?format=base64
+```
+
+如果自动识别不准，优先使用带参数的地址。
+
+也可以使用：
+
+```text
+https://your-sub-domain.example/your-sub-path?client=shadowrocket
+https://your-sub-domain.example/your-sub-path?client=v2rayn
+```
+
+## Cloudflare 环境变量
+
+进入 Cloudflare Pages 项目，打开：
+
+```text
+设置 -> 变量和机密 -> 添加变量
+```
+
+添加 `SUB_PATH` 环境变量：
+
+```text
+Name: SUB_PATH
+Value: your-sub-path
+```
+
+添加 `NODES` 环境变量：
+
+```text
+Name: NODES
+Value:
+hy2://password@example.com:443?sni=example.com&insecure=1#hysteria2-node
+tuic://uuid:password@example.com:443?congestion_control=bbr&udp_relay_mode=native&alpn=h3&sni=example.com#tuic-node
+vless://uuid@example.com:443?security=tls&sni=example.com&type=ws&host=example.com&path=%2Fvless#vless-node
+https://example.com/subscription-link
+```
+
+`SUB_PATH` 是订阅路径，不要加开头的 `/`。
+
+建议 `SUB_PATH` 只使用英文字母和数字，并且不要包含 `/`、空格或符号。
+
+`NODES` 是节点和订阅链接列表，一行一个。可以直接填写支持的节点，也可以填写 `https://` 开头的远程订阅链接。
+
+远程订阅支持两种常见格式：
+
+- Base64 编码的一行一个节点订阅。
+- 明文的一行一个节点订阅。
+
+默认接口会把支持的节点转换为 sing-box / SFA 可用的 JSON 配置。
+
+`format=base64` 和 `client=shadowrocket/v2rayn` 会返回 Base64 节点订阅，只保留 `hy2://`、`hysteria2://`、`tuic://`、`vless://` 节点。其它协议节点不会写入订阅。
+
+每个远程订阅最多等待 8 秒。超时、访问失败、使用 `http://` 或指向当前订阅地址时，会跳过对应链接，不影响其它节点输出。
+
+以后添加节点或订阅链接就加一行，删除时删掉对应那一行。
+
+保存变量后，重新部署 Pages 项目，让变量生效。
+
+## Cloudflare Pages 设置
+
+如果连接 Git 仓库：
+
+```text
+框架预设：无
+构建命令：留空
+构建输出目录：public
+```
+
+如果使用直接上传，需要上传整个项目目录，确保同时包含：
+
+```text
+functions/
+public/
+```
+
+## 注意
+
+- 如果 `NODES` 只放节点，可以使用普通环境变量，Cloudflare 后台可见，方便编辑。
+- 如果 `NODES` 里放远程订阅链接，建议使用加密变量或 Secret，因为订阅链接通常带有 token。
+- `SUB_PATH` 泄露后，改成新路径并重新部署即可。
+- 这个项目会合并 `NODES` 里的直接节点和远程订阅内容，默认返回 sing-box JSON 配置。
+- 响应头 `X-Subscription-Failed-Count` 会显示失败或被安全规则跳过的远程订阅数量。
+- 如果访问订阅地址返回 `Not found`，检查 `SUB_PATH` 是否配置正确。
+- 如果订阅为空，检查 `NODES` 是否配置在生产环境，远程订阅链接是否可访问，并重新部署。
