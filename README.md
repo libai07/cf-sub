@@ -66,6 +66,7 @@ Value:
 hysteria2://password@example.com:443?sni=example.com&insecure=1#hysteria2-node
 tuic://uuid:password@example.com:443?congestion_control=bbr&udp_relay_mode=native&alpn=h3&sni=example.com#tuic-node
 vless://uuid@example.com:443?security=tls&sni=example.com&type=ws&host=example.com&path=%2Fvless#vless-node
+http://example.com/sub/example
 https://example.com/subscription-link
 ```
 
@@ -73,7 +74,7 @@ https://example.com/subscription-link
 
 建议 `SUB_PATH` 只使用英文字母和数字，并且不要包含 `/`、空格或符号。
 
-`NODES` 是节点和订阅链接列表，一行一个。可以直接填写支持的节点，也可以填写 `https://` 开头的远程订阅链接。
+`NODES` 是节点和订阅链接列表，一行一个。可以直接填写支持的节点，也可以填写 `http://` 或 `https://` 开头的远程订阅链接。
 
 远程订阅支持两种常见格式：
 
@@ -84,7 +85,7 @@ https://example.com/subscription-link
 
 `format=base64` 和 `client=shadowrocket/v2rayn` 会返回 Base64 节点订阅，只保留 `hysteria2://`、`tuic://`、`vless://` 节点。其它协议节点不会写入订阅。
 
-每个远程订阅最多等待 8 秒。超时、访问失败、使用 `http://` 或指向当前订阅地址时，会跳过对应链接，不影响其它节点输出。
+每个远程订阅最多等待 8 秒。超时、访问失败或指向当前订阅地址时，会跳过对应链接，不影响其它节点输出。
 
 以后添加节点或订阅链接就加一行，删除时删掉对应那一行。
 

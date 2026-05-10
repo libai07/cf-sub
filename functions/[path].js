@@ -130,7 +130,7 @@ async function buildSubscription(value, requestUrl) {
       continue;
     }
 
-    if (url.protocol !== "https:" || isCurrentRequestUrl(url, requestUrl)) {
+    if (isCurrentRequestUrl(url, requestUrl)) {
       failedCount += 1;
       continue;
     }
