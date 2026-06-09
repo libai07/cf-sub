@@ -2,6 +2,13 @@ const SUBSCRIPTION_TIMEOUT_MS = 8000;
 const SUPPORTED_NODE_PROTOCOLS = ["hysteria2:", "tuic:", "vless:"];
 const BASE64_CLIENTS = ["shadowrocket", "v2rayn"];
 const SING_BOX_CLIENTS = ["sing-box", "singbox", "sfa"];
+const CLASH_CLIENTS = [
+  "clash",
+  "clash-meta",
+  "clashmeta",
+  "mihomo",
+  "stash",
+];
 const BASE_HEADERS = {
   "Cache-Control": "no-store",
   "X-Robots-Tag": "noindex, nofollow",
@@ -29,6 +36,12 @@ export async function onRequestGet(context) {
     return textResponse(encoded, subscription.failedCount);
   }
 
+  if (format === "clash") {
+    const clashConfig = toClashConfig(subscription.nodes);
+
+    return yamlResponse(clashConfig, subscription.failedCount);
+  }
+
   const singBoxConfig = toSingBoxConfig(subscription.nodes);
 
   return jsonResponse(singBoxConfig, subscription.failedCount);
@@ -44,6 +57,12 @@ function textResponse(body, failedCount, init = {}) {
 function jsonResponse(body, failedCount) {
   return new Response(JSON.stringify(body, null, 2), {
     headers: responseHeaders("application/json; charset=utf-8", failedCount),
+  });
+}
+
+function yamlResponse(body, failedCount) {
+  return new Response(`${toYaml(body)}\n`, {
+    headers: responseHeaders("application/yaml; charset=utf-8", failedCount),
   });
 }
 
@@ -81,26 +100,48 @@ function getSubscriptionFormat(request) {
       return "sing-box";
     }
 
-    if (BASE64_CLIENTS.includes(client)) {
+    if (
+      ["clash", "clash-meta", "clashmeta", "mihomo", "yaml", "yml"].includes(
+        format
+      ) ||
+      url.searchParams.has("clash") ||
+      url.searchParams.has("mihomo")
+    ) {
+      return "clash";
+    }
+
+    if (matchesAny(client, BASE64_CLIENTS)) {
       return "base64";
     }
 
-    if (SING_BOX_CLIENTS.includes(client)) {
+    if (matchesAny(client, SING_BOX_CLIENTS)) {
       return "sing-box";
     }
 
-    if (BASE64_CLIENTS.some((value) => userAgent.includes(value))) {
+    if (matchesAny(client, CLASH_CLIENTS)) {
+      return "clash";
+    }
+
+    if (matchesAny(userAgent, BASE64_CLIENTS)) {
       return "base64";
     }
 
-    if (SING_BOX_CLIENTS.some((value) => userAgent.includes(value))) {
+    if (matchesAny(userAgent, SING_BOX_CLIENTS)) {
       return "sing-box";
+    }
+
+    if (matchesAny(userAgent, CLASH_CLIENTS)) {
+      return "clash";
     }
 
     return "sing-box";
   } catch {
     return "sing-box";
   }
+}
+
+function matchesAny(value, candidates) {
+  return candidates.some((candidate) => value.includes(candidate));
 }
 
 function normalizeNodes(value) {
@@ -310,6 +351,34 @@ function toNodeSubscription(value) {
   return normalizeNodes(nodes.join("\n"));
 }
 
+function toClashConfig(value) {
+  const proxies = getLines(value)
+    .map(parseNode)
+    .filter(Boolean)
+    .map(formatClashProxy)
+    .filter(Boolean);
+  ensureUniqueNames(proxies);
+
+  const proxyNames = proxies.map((proxy) => proxy.name);
+  const groupProxies = proxyNames.length ? [...proxyNames, "DIRECT"] : ["DIRECT"];
+
+  return {
+    "mixed-port": 7890,
+    "allow-lan": false,
+    mode: "rule",
+    "log-level": "info",
+    proxies,
+    "proxy-groups": [
+      {
+        name: "PROXY",
+        type: "select",
+        proxies: groupProxies,
+      },
+    ],
+    rules: ["MATCH,PROXY"],
+  };
+}
+
 function isSupportedNodeLink(value) {
   try {
     const protocol = new URL(value).protocol;
@@ -426,6 +495,7 @@ function parseVlessNode(url) {
   };
   const flow = getParam(params, "flow");
   const packetEncoding = getParam(params, "packetEncoding", "packet_encoding");
+  const encryption = getParam(params, "encryption");
   const tls = buildTlsConfig(params);
   const transport = buildV2RayTransport(params);
 
@@ -435,6 +505,10 @@ function parseVlessNode(url) {
 
   if (packetEncoding) {
     outbound.packet_encoding = packetEncoding;
+  }
+
+  if (encryption) {
+    outbound.encryption = encryption;
   }
 
   if (tls) {
@@ -744,6 +818,237 @@ function formatSingBoxOutbound(proxy) {
   return outbound;
 }
 
+function formatClashProxy(proxy) {
+  switch (proxy.type) {
+    case "hysteria2":
+      return formatClashHysteria2Proxy(proxy);
+    case "tuic":
+      return formatClashTuicProxy(proxy);
+    case "vless":
+      return formatClashVlessProxy(proxy);
+    default:
+      return null;
+  }
+}
+
+function formatClashHysteria2Proxy(proxy) {
+  const clashProxy = {
+    name: proxy.tag,
+    type: "hysteria2",
+    server: proxy.server,
+    port: proxy.server_port,
+    password: proxy.password,
+  };
+
+  if (proxy.server_ports?.length) {
+    clashProxy.ports = proxy.server_ports.join(",");
+  }
+
+  if (proxy.hop_interval) {
+    clashProxy["hop-interval"] = proxy.hop_interval;
+  }
+
+  if (proxy.up_mbps) {
+    clashProxy.up = `${proxy.up_mbps} Mbps`;
+  }
+
+  if (proxy.down_mbps) {
+    clashProxy.down = `${proxy.down_mbps} Mbps`;
+  }
+
+  if (proxy.obfs?.type) {
+    clashProxy.obfs = proxy.obfs.type;
+
+    if (proxy.obfs.password) {
+      clashProxy["obfs-password"] = proxy.obfs.password;
+    }
+  }
+
+  addClashTlsFields(clashProxy, proxy.tls, {
+    sniKey: "sni",
+    fingerprintKey: "fingerprint",
+    tlsFlag: false,
+  });
+
+  return clashProxy;
+}
+
+function formatClashTuicProxy(proxy) {
+  const clashProxy = {
+    name: proxy.name,
+    server: proxy.server,
+    port: proxy.port,
+    type: "tuic",
+    uuid: proxy.uuid,
+    password: proxy.password,
+    "udp-relay-mode": proxy.udpRelayMode,
+    "congestion-controller": proxy.congestionController,
+  };
+
+  if (proxy.alpn?.length) {
+    clashProxy.alpn = proxy.alpn;
+  }
+
+  if (proxy.sni) {
+    clashProxy.sni = proxy.sni;
+  }
+
+  if (proxy.skipCertVerify) {
+    clashProxy["skip-cert-verify"] = true;
+  }
+
+  if (proxy.reduceRtt) {
+    clashProxy["reduce-rtt"] = true;
+  }
+
+  return clashProxy;
+}
+
+function formatClashVlessProxy(proxy) {
+  const clashProxy = {
+    name: proxy.tag,
+    type: "vless",
+    server: proxy.server,
+    port: proxy.server_port,
+    uuid: proxy.uuid,
+    udp: true,
+  };
+
+  if (proxy.flow) {
+    clashProxy.flow = proxy.flow;
+  }
+
+  if (proxy.packet_encoding) {
+    clashProxy["packet-encoding"] = proxy.packet_encoding;
+  }
+
+  if (proxy.encryption) {
+    clashProxy.encryption = proxy.encryption;
+  }
+
+  addClashTlsFields(clashProxy, proxy.tls, { sniKey: "servername" });
+  addClashV2RayTransport(clashProxy, proxy.transport);
+
+  return clashProxy;
+}
+
+function addClashTlsFields(clashProxy, tls, options = {}) {
+  if (!tls?.enabled) {
+    return;
+  }
+
+  const sniKey = options.sniKey || "servername";
+  const fingerprintKey = options.fingerprintKey || "client-fingerprint";
+
+  if (options.tlsFlag !== false) {
+    clashProxy.tls = true;
+  }
+
+  if (tls.server_name) {
+    clashProxy[sniKey] = tls.server_name;
+  }
+
+  if (tls.insecure) {
+    clashProxy["skip-cert-verify"] = true;
+  }
+
+  if (tls.alpn?.length) {
+    clashProxy.alpn = tls.alpn;
+  }
+
+  if (tls.utls?.fingerprint) {
+    clashProxy[fingerprintKey] = tls.utls.fingerprint;
+  }
+
+  if (tls.reality?.enabled) {
+    clashProxy["reality-opts"] = {
+      "public-key": tls.reality.public_key,
+    };
+
+    if (tls.reality.short_id) {
+      clashProxy["reality-opts"]["short-id"] = tls.reality.short_id;
+    }
+  }
+}
+
+function addClashV2RayTransport(clashProxy, transport) {
+  if (!transport) {
+    clashProxy.network = "tcp";
+    return;
+  }
+
+  if (transport.type === "ws") {
+    clashProxy.network = "ws";
+    clashProxy["ws-opts"] = {};
+
+    if (transport.path) {
+      clashProxy["ws-opts"].path = transport.path;
+    }
+
+    if (transport.headers) {
+      clashProxy["ws-opts"].headers = transport.headers;
+    }
+
+    return;
+  }
+
+  if (transport.type === "grpc") {
+    clashProxy.network = "grpc";
+    clashProxy["grpc-opts"] = {
+      "grpc-service-name": transport.service_name,
+    };
+    return;
+  }
+
+  if (transport.type === "httpupgrade") {
+    clashProxy.network = "ws";
+    clashProxy["ws-opts"] = {
+      "v2ray-http-upgrade": true,
+    };
+
+    if (transport.path) {
+      clashProxy["ws-opts"].path = transport.path;
+    }
+
+    if (transport.host) {
+      clashProxy["ws-opts"].headers = {
+        Host: transport.host,
+      };
+    }
+
+    return;
+  }
+
+  if (transport.type === "http") {
+    clashProxy.network = "h2";
+    clashProxy["h2-opts"] = {};
+
+    if (transport.host?.length) {
+      clashProxy["h2-opts"].host = transport.host;
+    }
+
+    if (transport.path) {
+      clashProxy["h2-opts"].path = transport.path;
+    }
+
+    return;
+  }
+
+  clashProxy.network = transport.type;
+}
+
+function ensureUniqueNames(proxies) {
+  const seen = new Map();
+
+  for (const proxy of proxies) {
+    const baseName = proxy.name || proxy.server || proxy.type;
+    const count = seen.get(baseName) || 0;
+
+    seen.set(baseName, count + 1);
+    proxy.name = count ? `${baseName}-${count + 1}` : baseName;
+  }
+}
+
 function ensureUniqueTags(outbounds) {
   const seen = new Map();
 
@@ -787,4 +1092,104 @@ function toBase64(value) {
   }
 
   return btoa(binary);
+}
+
+function toYaml(value, indent = 0) {
+  const spaces = " ".repeat(indent);
+
+  if (Array.isArray(value)) {
+    if (!value.length) {
+      return `${spaces}[]`;
+    }
+
+    return value.map((item) => formatYamlArrayItem(item, indent)).join("\n");
+  }
+
+  if (isPlainObject(value)) {
+    const entries = getYamlEntries(value);
+
+    if (!entries.length) {
+      return `${spaces}{}`;
+    }
+
+    return entries
+      .map(([key, item]) => {
+        if (isYamlBlockValue(item)) {
+          return `${spaces}${key}:\n${toYaml(item, indent + 2)}`;
+        }
+
+        return `${spaces}${key}: ${formatYamlScalar(item)}`;
+      })
+      .join("\n");
+  }
+
+  return `${spaces}${formatYamlScalar(value)}`;
+}
+
+function formatYamlArrayItem(item, indent) {
+  const spaces = " ".repeat(indent);
+
+  if (isPlainObject(item)) {
+    const entries = getYamlEntries(item);
+
+    if (!entries.length) {
+      return `${spaces}- {}`;
+    }
+
+    return entries
+      .map(([key, value], index) => {
+        const prefix = index ? `${spaces}  ` : `${spaces}- `;
+
+        if (isYamlBlockValue(value)) {
+          return `${prefix}${key}:\n${toYaml(value, indent + 4)}`;
+        }
+
+        return `${prefix}${key}: ${formatYamlScalar(value)}`;
+      })
+      .join("\n");
+  }
+
+  if (Array.isArray(item)) {
+    return `${spaces}-\n${toYaml(item, indent + 2)}`;
+  }
+
+  return `${spaces}- ${formatYamlScalar(item)}`;
+}
+
+function getYamlEntries(value) {
+  return Object.entries(value).filter(
+    ([, item]) => item !== undefined && item !== null
+  );
+}
+
+function isYamlBlockValue(value) {
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+
+  return isPlainObject(value) && getYamlEntries(value).length > 0;
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function formatYamlScalar(value) {
+  if (Array.isArray(value)) {
+    return "[]";
+  }
+
+  if (isPlainObject(value)) {
+    return "{}";
+  }
+
+  if (typeof value === "string") {
+    return JSON.stringify(value);
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  return "null";
 }

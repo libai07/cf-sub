@@ -2,7 +2,7 @@
 
 Cloudflare Pages 订阅服务。
 
-用于把 Cloudflare Pages 环境变量里的节点和远程订阅链接合并输出，默认返回 sing-box JSON，也可以返回 Base64 节点订阅。
+用于把 Cloudflare Pages 环境变量里的节点和远程订阅链接合并输出，默认返回 sing-box JSON，也可以返回 Base64 节点订阅和 Clash Meta/Mihomo YAML。
 
 ## 文件
 
@@ -29,9 +29,15 @@ Cloudflare Pages 订阅服务。
 ```text
 https://你的域名/SUB_PATH
 https://你的域名/SUB_PATH?format=base64
+https://你的域名/SUB_PATH?format=clash
+https://你的域名/SUB_PATH?format=mihomo
 https://你的域名/SUB_PATH?client=shadowrocket
 https://你的域名/SUB_PATH?client=v2rayn
+https://你的域名/SUB_PATH?client=clash
+https://你的域名/SUB_PATH?client=mihomo
 ```
+
+默认返回 sing-box JSON。`format=base64` 返回 Base64 节点订阅，`format=clash`/`format=mihomo` 返回 Clash Meta/Mihomo YAML。
 
 ## Cloudflare Pages 设置
 
