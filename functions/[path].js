@@ -1,5 +1,5 @@
 const DEFAULT_FORMAT = "base64";
-const SUPPORTED_PROTOCOLS = ["hysteria2:", "vless:"];
+const SUPPORTED_PROTOCOLS = ["hysteria2:", "vless:", "trojan:", "vmess:", "ss:", "tuic:"];
 const CLIENTS = {
   base64: [
     "shadowrocket",
@@ -144,7 +144,9 @@ function isSupportedNodeLink(value) {
   try {
     return SUPPORTED_PROTOCOLS.includes(new URL(value).protocol);
   } catch {
-    return false;
+    // Handle non-parseable URLs (e.g. old-format SS / VMess with raw base64 padding)
+    const match = value.match(/^([a-z][a-z0-9+\-.]*:\/\/)/i);
+    return match ? SUPPORTED_PROTOCOLS.includes(match[1].toLowerCase()) : false;
   }
 }
 
@@ -155,13 +157,22 @@ function parseNodes(value) {
 }
 
 function parseNode(value) {
+  let url;
   try {
-    const url = new URL(value);
-    if (url.protocol === "vless:") return parseVless(url);
-    if (url.protocol === "hysteria2:") return parseHysteria2(url);
+    url = new URL(value);
   } catch {
+    // URL constructor may fail on old-format SS / VMess with base64 padding
+    if (value.startsWith("ss://")) return parseShadowsocks(value);
+    if (value.startsWith("vmess://")) return parseVmess(value);
     return null;
   }
+
+  if (url.protocol === "vless:") return parseVless(url);
+  if (url.protocol === "hysteria2:") return parseHysteria2(url);
+  if (url.protocol === "trojan:") return parseTrojan(url);
+  if (url.protocol === "vmess:") return parseVmess(value);
+  if (url.protocol === "ss:") return parseShadowsocks(value);
+  if (url.protocol === "tuic:") return parseTuic(url);
 
   return null;
 }
@@ -205,6 +216,182 @@ function parseHysteria2(url) {
     upMbps: positiveNumber(param(params, "upmbps", "up_mbps", "up")),
     downMbps: positiveNumber(param(params, "downmbps", "down_mbps", "down")),
   };
+}
+
+function parseTrojan(url) {
+  const password = decodeURIComponent(url.username || "");
+  const port = parsePort(url);
+  if (!password || !url.hostname || !port) return null;
+
+  const params = url.searchParams;
+  return {
+    type: "trojan",
+    name: nodeName(url, "trojan"),
+    server: url.hostname,
+    port,
+    password,
+    tls: tlsConfig(params, { defaultEnabled: true }),
+    transport: v2rayTransport(params),
+  };
+}
+
+// Handles both SIP002 (ss://base64(method:password)@host:port) and
+// legacy format (ss://base64(method:password@host:port)).
+function parseShadowsocks(rawValue) {
+  // SIP002 format: URL parser gives us a valid hostname + port
+  try {
+    const url = new URL(rawValue);
+    const port = parsePort(url);
+    if (url.hostname && port) {
+      const rawUserinfo = decodeURIComponent(url.username || "");
+      let userinfo;
+      try { userinfo = fromBase64(rawUserinfo); } catch { userinfo = rawUserinfo; }
+      const colonIdx = userinfo.indexOf(":");
+      if (colonIdx === -1) return null;
+      const method = userinfo.slice(0, colonIdx);
+      const password = userinfo.slice(colonIdx + 1);
+      if (!method || !password) return null;
+      const params = url.searchParams;
+      return {
+        type: "shadowsocks",
+        name: nodeName(url, "shadowsocks"),
+        server: url.hostname,
+        port,
+        method,
+        password,
+        plugin: param(params, "plugin"),
+        pluginOpts: param(params, "plugin-opts"),
+      };
+    }
+  } catch {}
+
+  // Legacy format: ss://base64(method:password@host:port)#name
+  try {
+    const schemeEnd = rawValue.indexOf("://") + 3;
+    const hashIdx = rawValue.indexOf("#");
+    const name = hashIdx !== -1 ? decodeURIComponent(rawValue.slice(hashIdx + 1)) : "";
+    const encoded = rawValue.slice(schemeEnd, hashIdx !== -1 ? hashIdx : undefined).split("?")[0];
+    const decoded = fromBase64(encoded);
+
+    const atIdx = decoded.lastIndexOf("@");
+    if (atIdx === -1) return null;
+    const userinfo = decoded.slice(0, atIdx);
+    const serverPart = decoded.slice(atIdx + 1);
+    const colonIdx = userinfo.indexOf(":");
+    if (colonIdx === -1) return null;
+    const lastColon = serverPart.lastIndexOf(":");
+    if (lastColon === -1) return null;
+
+    const port = Number(serverPart.slice(lastColon + 1));
+    if (!port || port < 1 || port > 65535) return null;
+    const method = userinfo.slice(0, colonIdx);
+    const password = userinfo.slice(colonIdx + 1);
+    const server = serverPart.slice(0, lastColon);
+    if (!method || !password || !server) return null;
+
+    return { type: "shadowsocks", name: name || server, server, port, method, password, plugin: "", pluginOpts: "" };
+  } catch {
+    return null;
+  }
+}
+
+// VMess URLs are base64-encoded JSON objects: vmess://base64(json)
+function parseVmess(rawValue) {
+  try {
+    const encoded = rawValue.slice("vmess://".length).split("#")[0];
+    const config = JSON.parse(fromBase64(encoded));
+
+    const server = String(config.add || "").trim();
+    const port = Number(config.port);
+    const uuid = String(config.id || "").trim();
+    if (!server || !uuid || port < 1 || port > 65535) return null;
+
+    const net = String(config.net || "tcp").toLowerCase();
+    const tls = String(config.tls || "").toLowerCase();
+    const sni = String(config.sni || "").trim();
+    const host = String(config.host || "").trim();
+    const path = String(config.path || "").trim();
+    const fp = String(config.fp || "").trim();
+    const alpnStr = String(config.alpn || "").trim();
+
+    let tlsConf = null;
+    if (tls === "tls" || tls === "reality") {
+      tlsConf = { enabled: true };
+      if (sni) tlsConf.server_name = sni;
+      if (alpnStr) tlsConf.alpn = alpnStr.split(",").map((s) => s.trim()).filter(Boolean);
+      if (fp) tlsConf.utls = { enabled: true, fingerprint: fp };
+      if (tls === "reality" && config.pbk) {
+        tlsConf.reality = { enabled: true, public_key: String(config.pbk) };
+        if (config.sid) tlsConf.reality.short_id = String(config.sid);
+      }
+    }
+
+    let transport = null;
+    if (net && net !== "tcp" && net !== "none") {
+      if (net === "ws" || net === "websocket") {
+        transport = { type: "ws" };
+        if (path) transport.path = path;
+        if (host) transport.headers = { Host: host };
+      } else if (net === "grpc") {
+        transport = { type: "grpc", service_name: path };
+      } else if (net === "http" || net === "h2") {
+        transport = { type: "http", network: net };
+        if (host) transport.host = host.split(",").map((s) => s.trim()).filter(Boolean);
+        if (path) transport.path = path;
+      } else if (net === "quic") {
+        transport = { type: "quic" };
+      } else if (net === "httpupgrade") {
+        transport = { type: "httpupgrade" };
+        if (host) transport.host = host;
+        if (path) transport.path = path;
+      }
+    }
+
+    return {
+      type: "vmess",
+      name: String(config.ps || "").trim() || server,
+      server,
+      port,
+      uuid,
+      security: String(config.scy || config.security || "auto").toLowerCase(),
+      alterId: Number(config.aid || 0),
+      tls: tlsConf,
+      transport,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseTuic(url) {
+  const uuid = decodeURIComponent(url.username || "");
+  const password = decodeURIComponent(url.password || "");
+  const port = parsePort(url);
+  if (!uuid || !url.hostname || !port) return null;
+
+  const params = url.searchParams;
+  const alpn = splitList(param(params, "alpn"));
+  return {
+    type: "tuic",
+    name: nodeName(url, "tuic"),
+    server: url.hostname,
+    port,
+    uuid,
+    password,
+    congestionControl: param(params, "congestion_control", "congestionControl") || "cubic",
+    udpRelayMode: param(params, "udp_relay_mode", "udpRelayMode") || "native",
+    tls: {
+      enabled: true,
+      server_name: param(params, "sni", "server_name"),
+      alpn: alpn.length ? alpn : ["h3"],
+      insecure: boolParam(params, "allow_insecure", "allowInsecure", "skip-cert-verify"),
+    },
+  };
+}
+
+// Decode URL-safe or standard base64
+function fromBase64(value) {
+  return atob(value.replace(/-/g, "+").replace(/_/g, "/"));
 }
 
 function parsePort(url) {
@@ -350,6 +537,37 @@ function singBoxOutbound(node) {
     return outbound;
   }
 
+  if (node.type === "trojan") {
+    const outbound = { type: "trojan", tag: node.name, server: node.server, server_port: node.port, password: node.password };
+    setIf(outbound, "tls", node.tls);
+    setIf(outbound, "transport", node.transport);
+    return outbound;
+  }
+
+  if (node.type === "shadowsocks") {
+    const outbound = { type: "shadowsocks", tag: node.name, server: node.server, server_port: node.port, method: node.method, password: node.password };
+    if (node.plugin) {
+      outbound.plugin = node.plugin;
+      if (node.pluginOpts) outbound.plugin_opts = node.pluginOpts;
+    }
+    return outbound;
+  }
+
+  if (node.type === "vmess") {
+    const outbound = { type: "vmess", tag: node.name, server: node.server, server_port: node.port, uuid: node.uuid, security: node.security || "auto", alter_id: node.alterId || 0 };
+    setIf(outbound, "tls", node.tls);
+    setIf(outbound, "transport", node.transport);
+    return outbound;
+  }
+
+  if (node.type === "tuic") {
+    const outbound = { type: "tuic", tag: node.name, server: node.server, server_port: node.port, uuid: node.uuid, password: node.password };
+    setIf(outbound, "congestion_control", node.congestionControl);
+    setIf(outbound, "udp_relay_mode", node.udpRelayMode);
+    setIf(outbound, "tls", node.tls);
+    return outbound;
+  }
+
   return null;
 }
 
@@ -387,6 +605,55 @@ function mihomoProxy(node) {
     setIf(proxy, "obfs", node.obfsType);
     setIf(proxy, "obfs-password", node.obfsPassword);
     applyMihomoTls(proxy, node.tls, { serverNameKey: "sni" });
+    return proxy;
+  }
+
+  if (node.type === "trojan") {
+    const proxy = { name: node.name, type: "trojan", server: node.server, port: node.port, password: node.password, udp: true };
+    applyMihomoTls(proxy, node.tls, { serverNameKey: "sni", fingerprint: true, reality: true });
+    applyMihomoTransport(proxy, node.transport);
+    return proxy;
+  }
+
+  if (node.type === "shadowsocks") {
+    const proxy = { name: node.name, type: "ss", server: node.server, port: node.port, cipher: node.method, password: node.password, udp: true };
+    if (node.plugin) {
+      // SIP002 plugin string: "plugin-name;key=value;..."
+      const parts = String(node.plugin).split(";");
+      const pluginName = parts[0].trim();
+      proxy.plugin = pluginName.replace(/^obfs-local$/, "obfs");
+      if (parts.length > 1) {
+        const opts = {};
+        for (const part of parts.slice(1)) {
+          const eqIdx = part.indexOf("=");
+          if (eqIdx !== -1) opts[part.slice(0, eqIdx).trim()] = part.slice(eqIdx + 1).trim();
+        }
+        const pluginOpts = {};
+        if (opts.obfs) pluginOpts.mode = opts.obfs;
+        if (opts["obfs-host"]) pluginOpts.host = opts["obfs-host"];
+        if (opts.mode) pluginOpts.mode = opts.mode;
+        if (Object.keys(pluginOpts).length) proxy["plugin-opts"] = pluginOpts;
+      }
+    }
+    return proxy;
+  }
+
+  if (node.type === "vmess") {
+    const proxy = { name: node.name, type: "vmess", server: node.server, port: node.port, uuid: node.uuid, alterId: node.alterId || 0, cipher: node.security || "auto", udp: true };
+    applyMihomoTls(proxy, node.tls, { serverNameKey: "servername", fingerprint: true, reality: true });
+    applyMihomoTransport(proxy, node.transport);
+    return proxy;
+  }
+
+  if (node.type === "tuic") {
+    const proxy = { name: node.name, type: "tuic", server: node.server, port: node.port, uuid: node.uuid, password: node.password };
+    setIf(proxy, "congestion-controller", node.congestionControl);
+    setIf(proxy, "udp-relay-mode", node.udpRelayMode);
+    if (node.tls) {
+      setIf(proxy, "sni", node.tls.server_name);
+      setIf(proxy, "alpn", node.tls.alpn);
+      if (node.tls.insecure) proxy["skip-cert-verify"] = true;
+    }
     return proxy;
   }
 
@@ -467,6 +734,60 @@ function surgeProxy(node) {
     setSurge(params, "port-hopping", node.serverPorts.join(";"));
     setSurge(params, "port-hopping-interval", node.hopInterval);
     setSurge(params, "salamander-password", node.obfsPassword);
+    return { name: params[0], line: `${params.shift()} = ${params.join(", ")}` };
+  }
+
+  if (node.type === "trojan") {
+    const password = surgeParam(node.password);
+    if (!password) return null;
+    const params = [surgeName(node.name), "trojan", node.server, node.port, `password=${password}`];
+    if (node.tls) {
+      setSurge(params, "sni", node.tls.server_name);
+      if (node.tls.insecure) params.push("skip-cert-verify=true");
+    }
+    if (node.transport && node.transport.type === "ws") {
+      params.push("ws=true");
+      setSurge(params, "ws-path", node.transport.path);
+    }
+    return { name: params[0], line: `${params.shift()} = ${params.join(", ")}` };
+  }
+
+  if (node.type === "shadowsocks") {
+    const password = surgeParam(node.password);
+    if (!password) return null;
+    const params = [surgeName(node.name), "ss", node.server, node.port, `encrypt-method=${node.method}`, `password=${password}`, "udp-relay=true"];
+    return { name: params[0], line: `${params.shift()} = ${params.join(", ")}` };
+  }
+
+  if (node.type === "vmess") {
+    const params = [surgeName(node.name), "vmess", node.server, node.port, `username=${node.uuid}`];
+    if (node.tls) {
+      params.push("tls=true");
+      setSurge(params, "sni", node.tls.server_name);
+      if (node.tls.insecure) params.push("skip-cert-verify=true");
+      if (node.tls.utls) setSurge(params, "tls-fingerprint", node.tls.utls.fingerprint);
+    }
+    if (node.transport) {
+      if (node.transport.type === "ws") {
+        params.push("ws=true");
+        setSurge(params, "ws-path", node.transport.path);
+        if (node.transport.headers) setSurge(params, "ws-headers", `Host:${node.transport.headers.Host}`);
+      }
+    }
+    return { name: params[0], line: `${params.shift()} = ${params.join(", ")}` };
+  }
+
+  if (node.type === "tuic") {
+    // Requires Surge 5.9+
+    const password = surgeParam(node.password);
+    if (!password) return null;
+    const params = [surgeName(node.name), "tuic-v5", node.server, node.port, `uuid=${node.uuid}`, `password=${password}`];
+    if (node.tls) {
+      setSurge(params, "sni", node.tls.server_name);
+      if (node.tls.insecure) params.push("skip-cert-verify=true");
+      if (node.tls.alpn && node.tls.alpn.length) setSurge(params, "alpn", node.tls.alpn.join(","));
+    }
+    setSurge(params, "congestion-control", node.congestionControl);
     return { name: params[0], line: `${params.shift()} = ${params.join(", ")}` };
   }
 
