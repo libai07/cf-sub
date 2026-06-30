@@ -1,5 +1,5 @@
 const DEFAULT_FORMAT = "base64";
-const SUPPORTED_PROTOCOLS = ["hysteria2:", "vless:", "trojan:", "vmess:", "ss:", "tuic:"];
+const SUPPORTED_PROTOCOLS = ["hysteria2:", "vless:", "trojan:", "vmess:", "ss:", "tuic:", "anytls:"];
 const CLIENTS = {
   base64: [
     "shadowrocket",
@@ -173,6 +173,7 @@ function parseNode(value) {
   if (url.protocol === "vmess:") return parseVmess(value);
   if (url.protocol === "ss:") return parseShadowsocks(value);
   if (url.protocol === "tuic:") return parseTuic(url);
+  if (url.protocol === "anytls:") return parseAnytls(url);
 
   return null;
 }
@@ -247,7 +248,21 @@ function parseShadowsocks(rawValue) {
       let userinfo;
       try { userinfo = fromBase64(rawUserinfo); } catch { userinfo = rawUserinfo; }
       const colonIdx = userinfo.indexOf(":");
-      if (colonIdx === -1) return null;
+      if (colonIdx === -1) {
+        // Plain SIP002: method in url.username, password in url.password (common for SS-2022)
+        const passwordDirect = decodeURIComponent(url.password || "");
+        if (!rawUserinfo || !passwordDirect) return null;
+        return {
+          type: "shadowsocks",
+          name: nodeName(url, "shadowsocks"),
+          server: url.hostname,
+          port,
+          method: rawUserinfo,
+          password: passwordDirect,
+          plugin: param(params, "plugin"),
+          pluginOpts: param(params, "plugin-opts"),
+        };
+      }
       const method = userinfo.slice(0, colonIdx);
       const password = userinfo.slice(colonIdx + 1);
       if (!method || !password) return null;
@@ -389,6 +404,25 @@ function parseTuic(url) {
   };
 }
 
+function parseAnytls(url) {
+  const password = decodeURIComponent(url.username || "");
+  const port = parsePort(url);
+  if (!password || !url.hostname || !port) return null;
+
+  const params = url.searchParams;
+  return {
+    type: "anytls",
+    name: nodeName(url, "anytls"),
+    server: url.hostname,
+    port,
+    password,
+    tls: tlsConfig(params, { defaultEnabled: true }),
+    idleSessionCheckInterval: param(params, "idle-session-check-interval", "idle_session_check_interval"),
+    idleSessionTimeout: param(params, "idle-session-timeout", "idle_session_timeout"),
+    minIdleSession: positiveNumber(param(params, "min-idle-session", "min_idle_session")),
+  };
+}
+
 // Decode URL-safe or standard base64
 function fromBase64(value) {
   return atob(value.replace(/-/g, "+").replace(/_/g, "/"));
@@ -493,6 +527,23 @@ function v2rayTransport(params) {
     return transport;
   }
 
+  if (type === "xhttp" || type === "splithttp") {
+    const transport = { type: "xhttp" };
+    setIf(transport, "host", host);
+    setIf(transport, "path", path);
+    const mode = param(params, "mode");
+    setIf(transport, "mode", mode);
+    const rawExtra = param(params, "extra");
+    if (rawExtra) {
+      try {
+        transport.extra = JSON.parse(rawExtra);
+      } catch {
+        try { transport.extra = JSON.parse(fromBase64(rawExtra)); } catch {}
+      }
+    }
+    return transport;
+  }
+
   if (type === "http" || type === "h2") {
     const transport = { type: "http", network: type };
     setIf(transport, "host", splitList(host));
@@ -565,6 +616,15 @@ function singBoxOutbound(node) {
     setIf(outbound, "congestion_control", node.congestionControl);
     setIf(outbound, "udp_relay_mode", node.udpRelayMode);
     setIf(outbound, "tls", node.tls);
+    return outbound;
+  }
+
+  if (node.type === "anytls") {
+    const outbound = { type: "anytls", tag: node.name, server: node.server, server_port: node.port, password: node.password };
+    setIf(outbound, "tls", node.tls);
+    setIf(outbound, "idle_session_check_interval", node.idleSessionCheckInterval);
+    setIf(outbound, "idle_session_timeout", node.idleSessionTimeout);
+    if (node.minIdleSession) outbound.min_idle_session = node.minIdleSession;
     return outbound;
   }
 
@@ -657,6 +717,12 @@ function mihomoProxy(node) {
     return proxy;
   }
 
+  if (node.type === "anytls") {
+    const proxy = { name: node.name, type: "anytls", server: node.server, port: node.port, password: node.password };
+    applyMihomoTls(proxy, node.tls, { serverNameKey: "sni", fingerprint: true, reality: true });
+    return proxy;
+  }
+
   return null;
 }
 
@@ -696,6 +762,12 @@ function applyMihomoTransport(proxy, transport) {
     proxy["httpupgrade-opts"] = {};
     setIf(proxy["httpupgrade-opts"], "host", transport.host);
     setIf(proxy["httpupgrade-opts"], "path", transport.path);
+  } else if (transport.type === "xhttp") {
+    proxy.network = "xhttp";
+    proxy["xhttp-opts"] = {};
+    setIf(proxy["xhttp-opts"], "host", transport.host);
+    setIf(proxy["xhttp-opts"], "path", transport.path);
+    setIf(proxy["xhttp-opts"], "mode", transport.mode);
   } else {
     proxy.network = transport.type;
   }
